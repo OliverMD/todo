@@ -1,7 +1,4 @@
 #[macro_use]
-extern crate clap;
-extern crate failure;
-#[macro_use]
 extern crate log;
 extern crate simplelog;
 
@@ -11,10 +8,10 @@ use std::path::Path;
 use std::process;
 use std::str;
 
-use failure::Error;
+use clap::Parser;
 use git2::{Repository, StatusOptions};
 use regex::Regex;
-use simplelog::{Config, LevelFilter, TerminalMode};
+use simplelog::{ColorChoice, Config, LevelFilter, TerminalMode};
 
 struct TodoLine {
     line: String,
@@ -24,19 +21,26 @@ struct TodoLine {
 
 impl TodoLine {
     fn new(line: String, filename: String, lineno: u32) -> TodoLine {
-        TodoLine {line, filename, lineno}
+        TodoLine {
+            line,
+            filename,
+            lineno,
+        }
     }
 }
 
-fn main() -> Result<(), Error> {
-    let matches = clap_app!(todo =>
-        (version: "0.1.0")
-        (author: "Oliver Downard")
-        (about: "A git tool to find TODOs in your commit")
-        (@arg verbose: -v ... "Enable verbose mode")
-    ).get_matches();
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// The level of verbosity, higher value will be more verbose
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8, // TODO: ABC
+}
 
-    let log_level = match matches.occurrences_of("verbose") {
+fn main() -> Result<(), anyhow::Error> {
+    let cli = Cli::parse();
+
+    let log_level = match cli.verbose {
         0 => LevelFilter::Error,
         1 => LevelFilter::Warn,
         2 => LevelFilter::Info,
@@ -44,13 +48,18 @@ fn main() -> Result<(), Error> {
         4 | _ => LevelFilter::Trace,
     };
 
-    simplelog::TermLogger::init(log_level, Config::default(), TerminalMode::Stdout)?;
+    simplelog::TermLogger::init(
+        log_level,
+        Config::default(),
+        TerminalMode::Stdout,
+        ColorChoice::Auto,
+    )?;
 
     let repo = match Repository::discover(Path::new(".")) {
         Err(err) => {
             error!("Could not find git repo: {}", err);
             process::exit(0x0001);
-        },
+        }
         Ok(repo) => repo,
     };
 
@@ -61,16 +70,28 @@ fn main() -> Result<(), Error> {
     extract_for_existing_files(&repo, &mut todo_lines, |l| re.is_match(l))?;
     extract_for_new_files(&repo, &mut todo_lines, |l| re.is_match(l))?;
 
-
     for line in todo_lines {
-        println!("{}:{} - {}", line.filename, line.lineno, line.line.trim_end());
-    };
+        println!(
+            "{}:{} - {}",
+            line.filename,
+            line.lineno,
+            line.line.trim_end()
+        );
+    }
 
     Result::Ok(())
 }
 
-fn extract_for_existing_files<F: Fn(&str) -> bool>(repo: &Repository, results: &mut Vec<TodoLine>, is_todo_test: F) -> Result<(), Error> {
-    let oid = repo.head()?.resolve()?.target().ok_or(failure::err_msg("Could not get Oid"))?;
+fn extract_for_existing_files<F: Fn(&str) -> bool>(
+    repo: &Repository,
+    results: &mut Vec<TodoLine>,
+    is_todo_test: F,
+) -> Result<(), anyhow::Error> {
+    let oid = repo
+        .head()?
+        .resolve()?
+        .target()
+        .ok_or(anyhow::anyhow!("Could not get Oid"))?;
 
     let tree = repo.find_commit(oid)?.tree()?;
 
@@ -83,22 +104,38 @@ fn extract_for_existing_files<F: Fn(&str) -> bool>(repo: &Repository, results: &
         Option::Some(&mut |dd, _dh, dl| {
             if let Ok(line) = str::from_utf8(dl.content()) {
                 if is_todo_test(line) {
-                    results.push(TodoLine::new(line.into(), str::from_utf8(dd.new_file().path_bytes().unwrap()).unwrap().into(), dl.new_lineno().unwrap()))
+                    results.push(TodoLine::new(
+                        line.into(),
+                        str::from_utf8(dd.new_file().path_bytes().unwrap())
+                            .unwrap()
+                            .into(),
+                        dl.new_lineno().unwrap(),
+                    ))
                 }
                 true
             } else {
                 false
             }
-        })
+        }),
     )?;
     Ok(())
 }
 
-fn extract_for_new_files<F: Fn(&str) -> bool>(repo: &Repository, results: &mut Vec<TodoLine>, is_todo_test: F) -> Result<(), Error> {
-    let new_files: Vec<String> = repo.statuses(Option::Some(StatusOptions::new().include_untracked(true)))?.iter()
+fn extract_for_new_files<F: Fn(&str) -> bool>(
+    repo: &Repository,
+    results: &mut Vec<TodoLine>,
+    is_todo_test: F,
+) -> Result<(), anyhow::Error> {
+    let new_files: Vec<String> = repo
+        .statuses(Option::Some(StatusOptions::new().include_untracked(true)))?
+        .iter()
         .filter(|s| s.status().is_wt_new()) // Only get new files
-        .map(|s| s.path().ok_or(failure::err_msg("Invalid utf8 path")).map(Into::into))
-        .collect::<Result<Vec<String>, Error>>()?;
+        .map(|s| {
+            s.path()
+                .ok_or(anyhow::anyhow!("Invalid utf8 path"))
+                .map(Into::into)
+        })
+        .collect::<Result<Vec<String>, anyhow::Error>>()?;
 
     for filename in new_files.iter() {
         BufReader::new(File::open(Path::new(filename))?)
@@ -106,7 +143,9 @@ fn extract_for_new_files<F: Fn(&str) -> bool>(repo: &Repository, results: &mut V
             .filter_map(Result::ok)
             .enumerate()
             .filter(|(_, line)| is_todo_test(line))
-            .for_each(|(line_num, line)| results.push(TodoLine::new(line.into(), filename.into(), line_num as u32)));
+            .for_each(|(line_num, line)| {
+                results.push(TodoLine::new(line.into(), filename.into(), line_num as u32))
+            });
     }
 
     Result::Ok(())
